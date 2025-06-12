@@ -1,0 +1,21 @@
+# 環境変数
+.env
+.env.*
+
+# 依存関係
+node_modules/
+package-lock.json
+
+# ログ
+*.log
+npm-debug.log*
+
+# エディタ設定
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS生成ファイル
+.DS_Store
+Thumbs.db 

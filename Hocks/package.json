@@ -1,0 +1,13 @@
+{
+  "name": "jpysc",
+  "version": "1.0.0",
+  "description": "JPY Stablecoin on Xahau Testnet",
+  "main": "jpysc.js",
+  "scripts": {
+    "start": "node jpysc.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.5.0",
+    "xrpl": "^2.14.3"
+  }
+}
