@@ -61,6 +61,7 @@ int64_t handle_charge();
 int64_t handle_payment();
 int64_t handle_allowance_payment(uint8_t* data_ptr, int64_t data_len);
 int64_t handle_recharge_and_update_allowance();
+int64_t handle_withdrawal();
 
 // --- メイン関数 ---
 int64_t hook(uint32_t reserved)
@@ -84,6 +85,9 @@ int64_t hook(uint32_t reserved)
                 if (sto_from_json(type_buf, sizeof(type_buf), memo_data, memo_len, "type") > 0) {
                     if (BUFFER_EQUAL(type_buf, "update_allowance", 15)) {
                         return handle_recharge_and_update_allowance();
+                    }
+                    else if (BUFFER_EQUAL(type_buf, "withdraw", 7)) {
+                        return handle_withdrawal();
                     }
                 }
                 return handle_allowance_payment(memo_data, memo_len);
@@ -450,5 +454,83 @@ int64_t handle_recharge_and_update_allowance()
     state_set(signature_hex, signature_hex_len, SBUF(allowance_key) + 20);
 
     accept(SBUF("XApay: Recharge and allowance update successful."), SUCCESS);
+    return 0;
+}
+
+/**
+ * @brief 残高引き出しを処理する
+ * @return 承認または拒否コード
+ */
+int64_t handle_withdrawal()
+{
+    TRACESTR("XApay Hook: Handling Withdrawal.");
+
+    // 1. ユーザーのアカウントIDを取得
+    uint8_t user_accid[20];
+    otxn_field(SBUF(user_accid), sfAccount);
+
+    // 2. Memoから引き出し額を取得
+    uint8_t memo_data[1024];
+    int64_t memo_len = otxn_memo(0, SBUF(memo_data));
+    if (memo_len < 0) {
+        rollback(SBUF("XApay Error(Withdraw): Could not get memo."), ERROR_INVALID_MEMO);
+    }
+
+    uint8_t amount_str[32];
+    int64_t amount_len = sto_from_json(amount_str, sizeof(amount_str), memo_data, memo_len, "amount");
+    if (amount_len <= 0) {
+        rollback(SBUF("XApay Error(Withdraw): Could not get amount."), ERROR_MISSING_FIELD);
+    }
+
+    // 3. 引き出し額を数値に変換
+    int64_t withdraw_amount;
+    if (sto_int64(&withdraw_amount, amount_str, amount_len) < 0) {
+        rollback(SBUF("XApay Error(Withdraw): Invalid amount format."), ERROR_INVALID_TRANSACTION);
+    }
+    if (withdraw_amount <= 0) {
+        rollback(SBUF("XApay Error(Withdraw): Amount must be positive."), ERROR_INVALID_TRANSACTION);
+    }
+
+    // 4. ユーザーの残高を取得
+    uint8_t user_balance_key[21];
+    user_balance_key[0] = PREFIX_USER_BALANCE;
+    COPY(user_balance_key + 1, user_accid, 20);
+
+    int64_t current_balance = 0;
+    state_get(&current_balance, sizeof(current_balance), SBUF(user_balance_key));
+
+    // 5. 残高が十分か検証
+    if (current_balance < withdraw_amount) {
+        rollback(SBUF("XApay Error(Withdraw): Insufficient balance."), ERROR_INSUFFICIENT_BALANCE);
+    }
+
+    // 6. Emitted Transactionの準備
+    uint8_t emit_txn_buf[128];
+    etxn_details(SBUF(emit_txn_buf));
+
+    // 7. 送金する額を設定
+    uint8_t amount_buf[48];
+    uint8_t* ptr = amount_buf;
+    COPY(ptr, CURRENCY_JPY, 20); ptr += 20;
+    COPY(ptr, ISSUER_ACCID, 20); ptr += 20;
+    COPY(ptr, &withdraw_amount, 8);
+
+    // 8. Paymentトランザクションを発行
+    uint8_t* tx_params[] = {
+        user_accid,    // Destination: ユーザーのアドレス
+        amount_buf     // Amount: 引き出し額
+    };
+    uint32_t tx_param_lens[] = { 20, 48 };
+
+    int64_t emit_result = emit(SBUF(emit_txn_buf), SBUF("Payment"), tx_params, tx_param_lens);
+    if (emit_result < 0) {
+        rollback(SBUF("XApay Error(Withdraw): Failed to emit withdrawal transaction."), ERROR_INVALID_TRANSACTION);
+    }
+
+    // 9. 残高を更新
+    int64_t new_balance = current_balance - withdraw_amount;
+    state_set(&new_balance, sizeof(new_balance), SBUF(user_balance_key));
+
+    accept(SBUF("XApay: Withdrawal successful."), SUCCESS);
     return 0;
 }

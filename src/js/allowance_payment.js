@@ -155,6 +155,50 @@ async function sendPaymentWithAllowance(
   await client.disconnect();
 }
 
+/**
+ * フックに預けた残高の一部または全部を引き出すトランザクションを送信します。
+ * @param {XrplClient} client - XRPLクライアント
+ * @param {Account} userWallet - ユーザーのウォレット情報（アドレスと秘密鍵）
+ * @param {string} hookAddress - 決済フックのアカウントアドレス
+ * @param {string} withdrawAmount - 引き出すJPYSCの額
+ */
+export async function withdrawBalance(
+  client,
+  userWallet,
+  hookAddress,
+  withdrawAmount
+) {
+  // 1. トランザクションを構築
+  const tx = {
+    TransactionType: "Invoke",
+    Account: userWallet.address,
+    Destination: hookAddress,
+    Memos: [
+      // Memoフィールドに引き出し要求の情報を格納
+      {
+        Memo: {
+          MemoData: Buffer.from(
+            JSON.stringify({
+              type: "withdraw", // フック側で処理を識別するためのタイプ
+              amount: withdrawAmount,
+            })
+          ).toString("hex"),
+        },
+      },
+    ],
+  };
+
+  console.log("Submitting withdrawal transaction:", tx);
+
+  // 2. トランザクションに署名して送信
+  const result = await client.send(
+    { ...tx, Account: userWallet.address },
+    { wallet: userWallet }
+  );
+  console.log("Transaction result:", result);
+  return result;
+}
+
 // --- 実行部分 ---
 async function main() {
   const operatorWallet = xrpl.Wallet.fromSeed(process.env.OPERATOR_SEED);
@@ -200,4 +244,5 @@ module.exports = {
   createAllowanceSignature,
   sendPaymentWithAllowance,
   chargeAndUpdateAllowance,
+  withdrawBalance,
 };
