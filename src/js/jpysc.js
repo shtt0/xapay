@@ -1,17 +1,4 @@
-const xrpl = require("xrpl");
-require("dotenv").config();
-
-// 設定
-const ISSUER_ADDRESS = "rhyYNdxAyFQ7s2KYXhaTMJKF7NrkkZj1X9";
-const CURRENCY_CODE = "JPY";
-const XAHAU_TESTNET_URL = "wss://xahau-test.net";
-
-// クライアントの初期化
-async function initClient() {
-  const client = new xrpl.Client(XAHAU_TESTNET_URL);
-  await client.connect();
-  return client;
-}
+const { xrpl, ISSUER_ADDRESS, CURRENCY_CODE, initClient } = require("./hocks");
 
 // トークン発行
 async function issueToken(seed, amount = "1000000") {

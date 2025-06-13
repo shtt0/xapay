@@ -1,8 +1,6 @@
 // Hocks/allowance_payment.js (新規作成を想定)
-const xrpl = require("xrpl");
+const { xrpl, initClient } = require("./hocks");
 require("dotenv").config({ path: "../.env" });
-
-const client = new xrpl.Client(process.env.XAHOU_TESTNET_URL);
 
 /**
  * ユーザーが運営者に対して、指定した上限金額までの支払いを許可する署名を生成します。
@@ -43,7 +41,7 @@ async function sendPaymentWithAllowance(
   allowanceAmount,
   paymentAmount
 ) {
-  await client.connect();
+  const client = await initClient();
 
   console.log("--- 利用許可署名を使った決済トランザクションを準備中 ---");
 
@@ -109,4 +107,12 @@ async function main() {
   );
 }
 
-main();
+// スクリプトが直接実行された場合のみmain()を実行
+if (require.main === module) {
+  main();
+}
+
+module.exports = {
+  createAllowanceSignature,
+  sendPaymentWithAllowance,
+};
