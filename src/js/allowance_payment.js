@@ -1,5 +1,5 @@
 // Hocks/allowance_payment.js (新規作成を想定)
-const { xrpl, initClient } = require("./hocks");
+const { xrpl, ISSUER_ADDRESS, CURRENCY_CODE, initClient } = require("./hocks");
 require("dotenv").config({ path: "../.env" });
 
 /**
@@ -22,6 +22,82 @@ function createAllowanceSignature(
   ).signature;
   console.log(`生成された利用許可署名: ${signature}`);
   return signature;
+}
+
+/**
+ * 指定された額をチャージし、利用許可枠（アローワンス）を動的に更新するトランザクションを送信します。
+ * @param {xrpl.Wallet} userWallet - ユーザーのウォレット
+ * @param {string} hookAddress - 決済フックのアカウントアドレス
+ * @param {string} operatorAddress - サービス運営者のアドレス
+ * @param {string} chargeAmount - チャージするJPYSCの額
+ * @param {string} remainingAllowance - 現在の利用許可枠の残額
+ * @returns {Promise<Object>} トランザクション結果
+ */
+async function chargeAndUpdateAllowance(
+  userWallet,
+  hookAddress,
+  operatorAddress,
+  chargeAmount,
+  remainingAllowance
+) {
+  const client = await initClient();
+  try {
+    // 1. 新しい利用許可枠の合計額を計算
+    const newAllowanceAmount = (
+      parseFloat(remainingAllowance) + parseFloat(chargeAmount)
+    ).toString();
+
+    // 2. 新しい利用許可枠に対する署名を生成
+    const newSignature = createAllowanceSignature(
+      userWallet,
+      operatorAddress,
+      newAllowanceAmount
+    );
+
+    // 3. トランザクションを構築
+    const tx = {
+      TransactionType: "Invoke",
+      Account: userWallet.address,
+      Destination: hookAddress,
+      Amount: {
+        currency: CURRENCY_CODE,
+        issuer: ISSUER_ADDRESS,
+        value: chargeAmount,
+      },
+      Memos: [
+        {
+          Memo: {
+            MemoData: xrpl.convertStringToHex(
+              JSON.stringify({
+                type: "update_allowance",
+                allowance: newAllowanceAmount,
+                signature: newSignature,
+              })
+            ),
+            MemoFormat: xrpl.convertStringToHex("application/json"),
+          },
+        },
+      ],
+    };
+
+    console.log("--- スマートチャージトランザクションを送信中 ---");
+    console.log("チャージ額:", chargeAmount);
+    console.log("新しい利用許可枠:", newAllowanceAmount);
+
+    // 4. トランザクションに署名して送信
+    const prepared = await client.autofill(tx);
+    const signed = userWallet.sign(prepared);
+    const result = await client.submitAndWait(signed.tx_blob);
+
+    console.log("--- トランザクション結果 ---");
+    console.log(result);
+    return result;
+  } catch (error) {
+    console.error("エラー:", error);
+    throw error;
+  } finally {
+    await client.disconnect();
+  }
 }
 
 /**
@@ -85,7 +161,18 @@ async function main() {
   const hookAddress = xrpl.Wallet.fromSeed(process.env.HOOK_SEED).address;
   const userWallet = xrpl.Wallet.fromSeed(process.env.USER_SEED_1);
 
-  // 1. ユーザーが運営者(operator)に対し、10000 JPYまでの支払いを許可する
+  // スマートチャージの例
+  const chargeAmount = "2000";
+  const currentAllowance = "5000";
+  await chargeAndUpdateAllowance(
+    userWallet,
+    hookAddress,
+    operatorWallet.address,
+    chargeAmount,
+    currentAllowance
+  );
+
+  // 従来の支払い処理の例
   const allowanceAmount = "10000";
   const allowanceSignature = createAllowanceSignature(
     userWallet,
@@ -93,9 +180,6 @@ async function main() {
     allowanceAmount
   );
 
-  // ...後日、ユーザーが500 JPYの支払いを要求したと仮定...
-
-  // 2. 運営者は、預かっていた利用許可署名を使って決済を実行
   const paymentAmount = "500";
   await sendPaymentWithAllowance(
     operatorWallet,
@@ -115,4 +199,5 @@ if (require.main === module) {
 module.exports = {
   createAllowanceSignature,
   sendPaymentWithAllowance,
+  chargeAndUpdateAllowance,
 };

@@ -1,7 +1,7 @@
 /**
  * XApay Custom Hook - Production-Ready Sample Code
  *
- * VERSION: 2.0
+ * VERSION: 2.1
  *
  * IMPORTANT: This code is a sample for practical implementation.
  * A comprehensive security audit by professionals is MANDATORY before production deployment.
@@ -60,6 +60,7 @@ unsigned char OPERATOR_ACCID[20] = {
 int64_t handle_charge();
 int64_t handle_payment();
 int64_t handle_allowance_payment(uint8_t* data_ptr, int64_t data_len);
+int64_t handle_recharge_and_update_allowance();
 
 // --- メイン関数 ---
 int64_t hook(uint32_t reserved)
@@ -78,6 +79,13 @@ int64_t hook(uint32_t reserved)
             uint8_t memo_data[1024];
             int64_t memo_len = otxn_memo(0, SBUF(memo_data));
             if (memo_len > 0) {
+                // Memoの内容を確認して処理を分岐
+                uint8_t type_buf[32];
+                if (sto_from_json(type_buf, sizeof(type_buf), memo_data, memo_len, "type") > 0) {
+                    if (BUFFER_EQUAL(type_buf, "update_allowance", 15)) {
+                        return handle_recharge_and_update_allowance();
+                    }
+                }
                 return handle_allowance_payment(memo_data, memo_len);
             }
         }
@@ -329,5 +337,118 @@ int64_t handle_allowance_payment(uint8_t* data_ptr, int64_t data_len)
     state_set(new_spent_amount_buf, sizeof(new_spent_amount_buf), state_key, 20 + allowance_sig_hex_len);
     
     accept(SBUF("XApay: Allowance payment processed successfully."), SUCCESS);
+    return 0;
+}
+
+/**
+ * @brief チャージと利用許可枠の更新を同時に処理する
+ * @return 承認または拒否コード
+ */
+int64_t handle_recharge_and_update_allowance()
+{
+    TRACESTR("XApay Hook: Handling Recharge and Allowance Update.");
+
+    // 1. ユーザーのアカウントIDを取得
+    uint8_t user_accid[20];
+    otxn_field(SBUF(user_accid), sfAccount);
+
+    // 2. チャージ額を取得
+    uint8_t amount_buffer[48];
+    int64_t amount_len = otxn_field(SBUF(amount_buffer), sfAmount);
+    if (amount_len < 0) {
+        rollback(SBUF("XApay Error(Recharge): Could not get Amount field."), ERROR_INVALID_TRANSACTION);
+    }
+
+    // 3. 通貨と発行者を検証
+    uint8_t issuer_buffer[20];
+    if (sto_subfield(amount_buffer, amount_len, SBUF(issuer_buffer), sfIssuer) < 0) {
+        rollback(SBUF("XApay Error(Recharge): Could not get Issuer from Amount."), ERROR_CHARGE_INVALID_ISSUER);
+    }
+
+    uint8_t currency_buffer[20];
+    if (sto_subfield(amount_buffer, amount_len, SBUF(currency_buffer), sfCurrency) < 0) {
+        rollback(SBUF("XApay Error(Recharge): Could not get Currency from Amount."), ERROR_CHARGE_INVALID_CURRENCY);
+    }
+
+    if (!BUFFER_EQUAL(issuer_buffer, ISSUER_ACCID, 20) || !BUFFER_EQUAL(currency_buffer, CURRENCY_JPY, 20)) {
+        rollback(SBUF("XApay Error(Recharge): Invalid currency or issuer."), ERROR_CHARGE_INVALID_CURRENCY);
+    }
+
+    // 4. チャージ額を取得
+    int64_t charge_amount;
+    if (sto_amount_to_int64(&charge_amount, amount_buffer, amount_len) < 0) {
+        rollback(SBUF("XApay Error(Recharge): Could not parse amount value."), ERROR_INVALID_TRANSACTION);
+    }
+    if (charge_amount <= 0) {
+        rollback(SBUF("XApay Error(Recharge): Amount must be positive."), ERROR_INVALID_TRANSACTION);
+    }
+
+    // 5. Memoから新しい利用許可枠の情報を取得
+    uint8_t memo_data[1024];
+    int64_t memo_len = otxn_memo(0, SBUF(memo_data));
+    if (memo_len < 0) {
+        rollback(SBUF("XApay Error(Recharge): Could not get memo."), ERROR_INVALID_MEMO);
+    }
+
+    uint8_t new_allowance_str[32];
+    int64_t new_allowance_len = sto_from_json(new_allowance_str, sizeof(new_allowance_str), memo_data, memo_len, "allowance");
+    if (new_allowance_len <= 0) {
+        rollback(SBUF("XApay Error(Recharge): Could not get new allowance amount."), ERROR_MISSING_FIELD);
+    }
+
+    uint8_t signature_hex[148];
+    int64_t signature_hex_len = sto_from_json(signature_hex, sizeof(signature_hex), memo_data, memo_len, "signature");
+    if (signature_hex_len <= 0) {
+        rollback(SBUF("XApay Error(Recharge): Could not get signature."), ERROR_MISSING_FIELD);
+    }
+
+    // 6. 署名を検証
+    uint8_t operator_raddr[35];
+    util_accid(operator_raddr, sizeof(operator_raddr), OPERATOR_ACCID, 20);
+
+    uint8_t user_raddr[35];
+    util_accid(user_raddr, sizeof(user_raddr), user_accid, 20);
+
+    uint8_t message[256];
+    uint8_t* ptr = message;
+    COPY(ptr, user_raddr, 34); ptr += 34;
+    ptr[0] = ':'; ptr++;
+    COPY(ptr, operator_raddr, 34); ptr += 34;
+    ptr[0] = ':'; ptr++;
+    COPY(ptr, new_allowance_str, new_allowance_len);
+    int64_t message_len = 34 + 1 + 34 + 1 + new_allowance_len;
+
+    uint8_t signature[74];
+    int64_t signature_len = util_hex_to_byte(signature, sizeof(signature), signature_hex, signature_hex_len);
+
+    uint8_t user_pubkey[33];
+    int64_t kl_ret = util_keylet(user_pubkey, sizeof(user_pubkey), KEYLET_ACCOUNT, user_accid, 20, 0,0,0,0);
+    int64_t slot_no = slot_set(user_pubkey, kl_ret);
+    int64_t pubkey_len = slot_subfield(slot_no, sfRegularKey, user_pubkey, sizeof(user_pubkey));
+    if (pubkey_len <= 0) pubkey_len = slot_subfield(slot_no, sfAccount, user_pubkey, sizeof(user_pubkey));
+
+    if (util_verify(message, message_len, signature, signature_len, user_pubkey, pubkey_len) != 1) {
+        rollback(SBUF("XApay Error(Recharge): Signature verification failed."), ERROR_ALLOWANCE_VERIFICATION_FAILED);
+    }
+
+    // 7. 残高を更新
+    uint8_t user_balance_key[21];
+    user_balance_key[0] = PREFIX_USER_BALANCE;
+    COPY(user_balance_key + 1, user_accid, 20);
+
+    int64_t current_balance = 0;
+    state_get(&current_balance, sizeof(current_balance), SBUF(user_balance_key));
+    int64_t new_balance = current_balance + charge_amount;
+    state_set(&new_balance, sizeof(new_balance), SBUF(user_balance_key));
+
+    // 8. 新しい利用許可枠を保存
+    uint8_t allowance_key[21];
+    allowance_key[0] = PREFIX_ALLOWANCE;
+    COPY(allowance_key + 1, user_accid, 20);
+
+    state_set(new_allowance_str, new_allowance_len, SBUF(allowance_key));
+    state_set(signature_hex, signature_hex_len, SBUF(allowance_key) + 20);
+
+    accept(SBUF("XApay: Recharge and allowance update successful."), SUCCESS);
     return 0;
 }
